@@ -1,0 +1,38 @@
+{
+  "CUF8P851rexvZuxspPcLhEKAzGH6bWNdhvSv3P9Sxcpv": {
+    "identifier": "KJ8vH5ZMBYbpQllXHCNlLAT3",
+    "wallet": "CUF8P851rexvZuxspPcLhEKAzGH6bWNdhvSv3P9Sxcpv",
+    "nickname": "1234",
+    "lastConnectionDate": "2025-02-24T11:48:35.858Z",
+    "lastNicknameChange": ""
+  },
+  "42NfCA3SkTdCLPk2mH7HpopZU9o7ktoEVwBcDQ2VbUxN": {
+    "identifier": "SS9wquLVvm9HJ5NtUCJooLQj",
+    "wallet": "42NfCA3SkTdCLPk2mH7HpopZU9o7ktoEVwBcDQ2VbUxN",
+    "nickname": "Wazeeee",
+    "lastConnectionDate": "2025-02-24T11:46:20.215Z",
+    "lastNicknameChange": "2025-02-28T00:30:35.501Z",
+    "credits": 100
+  },
+  "BwEeb9D1RmDQJ5DPwoD5rehJTUfQTgEByzmwhusMaeEy": {
+    "identifier": "fFF01yAbDoF3tye2lZ0mPsyx",
+    "wallet": "BwEeb9D1RmDQJ5DPwoD5rehJTUfQTgEByzmwhusMaeEy",
+    "nickname": "User_1913ccdfe28c5cad34d1ded6",
+    "lastConnectionDate": "2025-02-28T16:03:18.481Z",
+    "lastNicknameChange": ""
+  },
+  "AaWWHxaQHkiXq59Wz1CLeHFtMRuL46QiyMwfZooioFPD": {
+    "identifier": "pnfmKc5jixyH2AoORaAO2DXE",
+    "wallet": "AaWWHxaQHkiXq59Wz1CLeHFtMRuL46QiyMwfZooioFPD",
+    "nickname": "waze",
+    "lastConnectionDate": "2025-03-08T02:45:53.422Z",
+    "lastNicknameChange": "2025-03-08T02:46:06.530Z"
+  },
+  "1Rz7hoY2b9WVXEGHFiQcFheovqDASURLUh9f8ZBaoDq": {
+    "identifier": "p9kuFvKpy7uZUzJp6pEfoT3j",
+    "wallet": "1Rz7hoY2b9WVXEGHFiQcFheovqDASURLUh9f8ZBaoDq",
+    "nickname": "User_29d1232118114021f0a97bba",
+    "lastConnectionDate": "2025-03-14T13:21:25.877Z",
+    "lastNicknameChange": ""
+  }
+}
