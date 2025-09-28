@@ -1,406 +1,643 @@
- require('dotenv').config();
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const expressSanitizer = require('express-sanitizer');
-const http = require('http');
-const socketIo = require('socket.io');
-const mongoSanitize = require('express-mongo-sanitize');
-const crypto = require('crypto');
+this is the server.js that is deployed const { Connection, PublicKey } = require("@solana/web3.js");
+const express = require("express");
 
-const ACTION_LOG_FILE = path.join(__dirname, 'actionlog.json');
-const BALLOON_STATE_FILE = path.join(__dirname, 'balloonstate.json');
-const COMMENTS_FILE = path.join(__dirname, 'comments.json');
+// CONFIG
+const RPC_ENDPOINT = "https://mainnet.helius-rpc.com/?api-key=07ed88b0-3573-4c79-8d62-3a2cbd5c141a";
+const TOKEN_MINT = "8KK76tofUfbe7pTh1yRpbQpTkYwXKUjLzEBtAUTwpump";
+const SPIN_INTERVAL = 15 * 60 * 1000; // 15 minutes
+
+let holders = [];
+let spinHistory = [];
+let connection = new Connection(RPC_ENDPOINT);
 const app = express();
-const server = http.createServer(app);
-const io = socketIo(server);
-const PORT = process.env.PORT || 3000;
-const DATA_FILE = path.join(__dirname, process.env.DATA_FILE || 'posts.json');
-const USERS_FILE = path.join(__dirname, 'users.json');
 
-// Ensure files exist
-if (!fs.existsSync(ACTION_LOG_FILE)) {
-    fs.writeFileSync(ACTION_LOG_FILE, '[]');
-}
-if (!fs.existsSync(BALLOON_STATE_FILE)) {
-    fs.writeFileSync(BALLOON_STATE_FILE, JSON.stringify({
-        size: 0,
-        lastPumpedBy: null,
-        gameEnded: false,
-    }));
-}
-// Ensure comments.json exists
-if (!fs.existsSync(COMMENTS_FILE)) {
-    fs.writeFileSync(COMMENTS_FILE, '[]');
-}
+app.use(express.static('public'));
 
-// Read comments from file
-function readComments() {
+// Get token holders
+async function getHolders() {
     try {
-        return JSON.parse(fs.readFileSync(COMMENTS_FILE, 'utf8'));
-    } catch (error) {
-        console.error('Error reading comments:', error);
-        return [];
+        const accounts = await connection.getParsedProgramAccounts(
+            new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+            {
+                filters: [
+                    { dataSize: 165 },
+                    { memcmp: { offset: 0, bytes: TOKEN_MINT } },
+                ]
+            }
+        );
+        
+        // First get all holders
+        const allHolders = accounts.map(acc => ({
+            address: acc.pubkey.toBase58(),
+            owner: acc.account.data.parsed.info.owner,
+            amount: Number(acc.account.data.parsed.info.tokenAmount.amount)
+        })).filter(h => h.amount > 0);
+        
+        // Calculate total supply
+        const totalSupply = allHolders.reduce((sum, h) => sum + h.amount, 0);
+        
+        // Filter out holders with more than 5% of total supply
+        holders = allHolders.filter(holder => {
+            const percentage = (holder.amount / totalSupply) * 100;
+            return percentage <= 5; // Only include holders with 5% or less
+        });
+        
+        console.log(`Updated ${holders.length} eligible holders (excluded ${allHolders.length - holders.length} holders with >5% supply)`);
+    } catch (e) {
+        console.error("Error:", e.message);
     }
 }
 
-// Write comments to file
-function writeComments(comments) {
-    try {
-        fs.writeFileSync(COMMENTS_FILE, JSON.stringify(comments, null, 2));
-    } catch (error) {
-        console.error('Error writing comments:', error);
-    }
-}
-
-const logAction = (action) => {
-    let actions = [];
-    try {
-        actions = JSON.parse(fs.readFileSync(ACTION_LOG_FILE, 'utf8'));
-    } catch (error) {
-        console.error('Error reading action log:', error);
-    }
+// Spin the wheel
+function spinWheel() {
+    if (holders.length === 0) return null;
     
-    // Add new action at the beginning of the array
-    actions.unshift(action);
+    const totalTokens = holders.reduce((sum, h) => sum + h.amount, 0);
+    let random = Math.random() * totalTokens;
     
-    try {
-        fs.writeFileSync(ACTION_LOG_FILE, JSON.stringify(actions, null, 2));
-        io.emit('action_logged', action);
-    } catch (error) {
-        console.error('Error writing action log:', error);
-    }
-};
-
-// Middleware
-app.use(mongoSanitize());
-app.use(express.json());
-app.use(expressSanitizer());
-app.use(cors());
-
-// Rate limiting to prevent DDoS attacks
-const limiter = rateLimit({
-    windowMs: 5 * 60 * 1000, // 5 minutes
-    max: 1000 // limit each IP to 100 requests per windowMs
-});
-app.use(limiter);
-
-// Serve static files from /public
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Ensure files exist
-function ensureFileExists(filePath, defaultContent = '{}') {
-    if (!fs.existsSync(filePath)) {
-        fs.writeFileSync(filePath, defaultContent);
-    }
-}
-
-// Read data from a JSON file
-function readJsonFile(filePath) {
-    ensureFileExists(filePath);
-    try {
-        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    } catch (error) {
-        console.error(`Error reading ${filePath}:`, error);
-        return {};
-    }
-}
-
-// Write data to a JSON file
-function writeJsonFile(filePath, data) {
-    try {
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-        console.log(`Successfully wrote to ${filePath}`);
-    } catch (error) {
-        console.error(`Error writing to ${filePath}:`, error);
-    }
-}
-
-// Generate a unique 24-character alphanumeric string
-function generateUniqueIdentifier(existingIdentifiers) {
-    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let identifier;
-    do {
-        identifier = Array.from({ length: 24 }, () => characters.charAt(Math.floor(Math.random() * characters.length))).join('');
-    } while (existingIdentifiers.includes(identifier));
-    return identifier;
-}
-
-// Generate a unique nickname
-function generateUniqueNickname(existingNicknames) {
-    let nickname;
-    do {
-        nickname = `User_${crypto.randomBytes(12).toString('hex')}`;
-    } while (existingNicknames.includes(nickname));
-    return nickname;
-}
-
-// Ensure files exist
-ensureFileExists(DATA_FILE);
-ensureFileExists(USERS_FILE, '{}');
-
-const connectedUsers = {}; // Tracks connected users by session ID
-let users = readJsonFile(USERS_FILE); // Load users from users.json
-let balloonState = readJsonFile(BALLOON_STATE_FILE);
-
-// WebSocket connection handler
-io.on('connection', (socket) => {
-    console.log('New client connected');
-
-    // Load and send the action log, balloon state, and comments to the client
-    try {
-        const actions = JSON.parse(fs.readFileSync(ACTION_LOG_FILE, 'utf8'));
-        const comments = readComments();
-        socket.emit('load_initial_state', { actions, balloonState, comments });
-    } catch (error) {
-        console.error('Error loading initial state:', error);
-        socket.emit('load_initial_state', { actions: [], balloonState, comments: [] });
-    }
-
-    // Handle new comment
-    socket.on('new_comment', (comment) => {
-        const comments = readComments();
-        comments.push(comment);
-        writeComments(comments);
-        io.emit('new_comment', comment);
-    });
-
-// Handle like comment
-socket.on('like_comment', (data) => {
-    const comments = readComments();
-    const comment = comments.find(c => c.timestamp === data.commentId);
-
-    if (comment) {
-        // Initialize likedBy array if it doesn't exist
-        if (!comment.likedBy) {
-            comment.likedBy = [];
-        }
-
-        // Check if the wallet has already liked the comment
-        if (comment.likedBy.includes(data.wallet)) {
-            console.log(`Wallet ${data.wallet} already liked comment ${data.commentId}`);
-            return; // Prevent duplicate likes
-        }
-
-        // Add the wallet to the likedBy array and increment likes
-        comment.likedBy.push(data.wallet);
-        comment.likes += 1;
-
-        writeComments(comments);
-        io.emit('comment_liked', { commentId: data.commentId, likes: comment.likes, likedBy: comment.likedBy });
-    }
-});
-
-    // Handle new reply
-    socket.on('new_reply', (data) => {
-        const comments = readComments();
-        const comment = comments.find(c => c.timestamp === data.commentId);
-        if (comment) {
-            comment.replies.push(data.reply);
-            writeComments(comments);
-            io.emit('new_reply', data);
-        }
-    });
-
-    socket.on('save_user_data', (data) => {
-        const { wallet } = data;
-        if (typeof wallet !== 'string') {
-            console.error('Invalid wallet address:', wallet);
-            return;
-        }
-
-        users = readJsonFile(USERS_FILE);
-        let user = users[wallet];
-
-        if (!user) {
-            const existingIdentifiers = Object.values(users).map(u => u.identifier);
-            const existingNicknames = Object.values(users).map(u => u.nickname);
-            const identifier = generateUniqueIdentifier(existingIdentifiers);
-            const nickname = generateUniqueNickname(existingNicknames);
-
-            user = {
-                identifier,
-                wallet,
-                nickname,
-                lastConnectionDate: new Date().toISOString(),
-                lastNicknameChange: ''
+    for (const holder of holders) {
+        if (random < holder.amount) {
+            const winner = {
+                address: holder.owner,
+                tokens: holder.amount,
+                time: new Date().toLocaleString(),
+                percentage: (holder.amount / totalTokens * 100).toFixed(4)
             };
-
-            users[wallet] = user;
-            writeJsonFile(USERS_FILE, users);
-        } else {
-            user.lastConnectionDate = new Date().toISOString();
+            spinHistory.unshift(winner);
+            if (spinHistory.length > 50) spinHistory.pop();
+            
+            console.log(`🎉 POWERBALL WINNER: ${winner.address}`);
+            return winner;
         }
+        random -= holder.amount;
+    }
+    return null;
+}
 
-        connectedUsers[socket.id] = user;
-        console.log(`User data loaded: ${wallet} (Identifier: ${user.identifier}, Nickname: ${user.nickname})`);
-        socket.emit('user_data', user);
-    });
-
-    // Handle pump event from server
-    socket.on('pump', (data) => {
-        const { wallet, gameId } = data;
-        const user = users[wallet];
-
-        if (!user || balloonState.gameEnded) {
-            console.log('User not found or game already ended:', wallet);
-            return;
+// Serve HTML
+app.get("/", (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>POWERBALL WHEEL OF HOLDERS</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Arial Black', Arial, sans-serif; 
+            background: linear-gradient(135deg, #0a0a2a, #1a1a4a);
+            color: white;
+            min-height: 100vh;
+            overflow-x: hidden;
         }
-
-        // Calculate 4.7% chance to pop the balloon
-        const popChance = Math.random() * 100; // Random number between 0 and 100
-        if (popChance < 0.7) {
-            // Pop the balloon
-            balloonState.gameEnded = true;
-            balloonState.size = 0; // Set balloon size to 0
-            writeJsonFile(BALLOON_STATE_FILE, balloonState);
-
-            // Broadcast the balloon_popped event to all clients
-            io.emit('balloon_popped', { gameId, wallet, nickname: user.nickname || 'Anonymous' });
-
-            // Log the action with "+ popped"
-            const action = {
-                gameId,
-                wallet,
-                nickname: user.nickname || 'Anonymous',
-                action: 'Pumped + popped',
-                timestamp: new Date().toISOString()
-            };
-            logAction(action);
-
-            // Start the restart countdown
-            setTimeout(() => {
-                balloonState.gameEnded = false;
-                writeJsonFile(BALLOON_STATE_FILE, balloonState);
-                io.emit('game_restarting', { message: 'Game restarting in 5 seconds...' });
-            }, 5000);
-        } else {
-            // Normal pump action
-            balloonState.size += 1;
-            balloonState.lastPumpedBy = user.nickname;
-            writeJsonFile(BALLOON_STATE_FILE, balloonState);
-
-            const action = {
-                gameId,
-                wallet,
-                nickname: user.nickname || 'Anonymous',
-                action: 'Pumped',
-                timestamp: new Date().toISOString()
-            };
-            logAction(action);
-
-            // Broadcast the updated balloon size to all clients
-            io.emit('update_balloon', balloonState);
+        .powerball-header {
+            text-align: center;
+            padding: 20px;
+            background: linear-gradient(45deg, #ff0000, #ff6b00);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            font-size: 3em;
+            text-shadow: 0 0 30px rgba(255, 107, 0, 0.5);
+            margin-bottom: 20px;
         }
-    });
-
-    // Handle check_game_state event
-    socket.on('check_game_state', (data, callback) => {
-        // Send the current game state back to the client
-        callback(balloonState);
-    });
-
-    // Handle dump event from server
-    socket.on('dump', (data) => {
-        const { wallet, gameId } = data;
-        const user = users[wallet];
-
-        if (!user || balloonState.gameEnded) {
-            console.log('User not found or game already ended:', wallet);
-            return;
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            padding: 0 20px;
+            margin-bottom: 30px;
         }
-
-        balloonState.size = Math.max(0, balloonState.size - 1);
-        balloonState.lastPumpedBy = user.nickname;
-        writeJsonFile(BALLOON_STATE_FILE, balloonState);
-
-        const action = {
-            gameId,
-            wallet,
-            nickname: user.nickname || 'Anonymous',
-            action: 'Dumped',
-            timestamp: new Date().toISOString()
-        };
-        logAction(action);
-
-        // Broadcast the updated balloon size to all clients
-        io.emit('update_balloon', balloonState);
-    });
-
-    socket.on('change_nickname', (data) => {
-        const { wallet, newNickname } = data;
-        const user = users[wallet];
-        if (!user) {
-            socket.emit('nickname_error', { message: 'User not found.' });
-            return;
+        .stat-card {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 15px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
         }
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #ffd700;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+        }
+        .stat-label {
+            font-size: 0.9em;
+            color: #ccc;
+            margin-top: 5px;
+        }
+        
+        /* GIANT WHEEL DESIGN */
+        .wheel-container {
+            position: relative;
+            width: 600px;
+            height: 600px;
+            margin: 30px auto;
+        }
+        .wheel {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #ff0000, #ff6b00, #ffd700, #00ff88, #0066ff);
+            position: relative;
+            overflow: hidden;
+            border: 10px solid #ffd700;
+            box-shadow: 0 0 50px rgba(255, 215, 0, 0.5);
+            transition: transform 4s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        .wheel-spinning {
+            animation: spin 0.1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .wheel-slice {
+            position: absolute;
+            width: 50%;
+            height: 50%;
+            transform-origin: 100% 100%;
+            left: 0;
+            top: 0;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            padding-left: 60px;
+            font-size: 12px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+            overflow: hidden;
+        }
+        .wheel-slice:nth-child(odd) {
+            background: rgba(255, 0, 0, 0.6);
+        }
+        .wheel-slice:nth-child(even) {
+            background: rgba(255, 107, 0, 0.6);
+        }
+        .wheel-center {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 80px;
+            height: 80px;
+            background: radial-gradient(circle, #ff0000, #8b0000);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 30px rgba(255, 0, 0, 0.8);
+            z-index: 10;
+            border: 5px solid #ffd700;
+        }
+        .wheel-pointer {
+            position: absolute;
+            top: -40px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0;
+            height: 0;
+            border-left: 30px solid transparent;
+            border-right: 30px solid transparent;
+            border-top: 60px solid #ffd700;
+            filter: drop-shadow(0 0 20px gold);
+            z-index: 100;
+        }
+        .wheel-pointer::after {
+            content: '';
+            position: absolute;
+            top: -70px;
+            left: -10px;
+            width: 20px;
+            height: 20px;
+            background: #ff0000;
+            border-radius: 50%;
+        }
+        
+        .controls {
+            text-align: center;
+            margin: 20px 0;
+        }
+        .spin-button {
+            background: linear-gradient(45deg, #ff0000, #ff6b00);
+            border: none;
+            padding: 20px 60px;
+            font-size: 1.5em;
+            color: white;
+            border-radius: 50px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 0 30px rgba(255, 107, 0, 0.5);
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        .spin-button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 40px rgba(255, 107, 0, 0.8);
+        }
+        .spin-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .countdown {
+            font-size: 1.5em;
+            text-align: center;
+            color: #ffd700;
+            margin: 15px 0;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+        }
+        .holders-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 10px;
+            padding: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .holder-card {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 12px;
+            border-radius: 8px;
+            border-left: 4px solid #ff6b00;
+        }
+        .holder-address {
+            font-family: monospace;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+        .holder-tokens {
+            color: #ffd700;
+            font-size: 0.8em;
+        }
+        .history-section {
+            background: rgba(0, 0, 0, 0.5);
+            margin: 20px;
+            padding: 20px;
+            border-radius: 15px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+        }
+        .history-title {
+            color: #ffd700;
+            text-align: center;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }
+        .history-item {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 8px;
+            border-left: 4px solid #ff0000;
+        }
+        a {
+            color: #00ff88;
+            text-decoration: none;
+            transition: color 0.3s;
+        }
+        a:hover {
+            color: #ffd700;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+        }
+        .winner-popup {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: linear-gradient(45deg, #ff0000, #ff6b00);
+            padding: 40px;
+            border-radius: 25px;
+            text-align: center;
+            z-index: 1000;
+            box-shadow: 0 0 80px rgba(255, 0, 0, 0.9);
+            animation: popup 0.5s ease-out;
+            border: 5px solid #ffd700;
+        }
+        @keyframes popup {
+            from { transform: translate(-50%, -50%) scale(0); opacity: 0; }
+            to { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        }
+        .current-winner {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 15px;
+            text-align: center;
+            z-index: 50;
+            border: 3px solid #ffd700;
+            min-width: 200px;
+        }
+        .winner-address {
+            font-family: monospace;
+            font-size: 1.1em;
+            color: #ffd700;
+            margin-bottom: 10px;
+            word-break: break-all;
+        }
+        .winner-stats {
+            font-size: 0.9em;
+            color: #00ff88;
+        }
+    </style>
+</head>
+<body>
+    <h1 class="powerball-header">🎡POWERBALL WHEEL OF HOLDERS 🎡</h1>
+    
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-number" id="total-holders">${holders.length}</div>
+            <div class="stat-label">TOTAL HOLDERS</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number" id="total-supply">${holders.reduce((sum, h) => sum + h.amount, 0).toLocaleString()}</div>
+            <div class="stat-label">TOTAL TOKENS</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number" id="next-spin">15:00</div>
+            <div class="stat-label">NEXT SPIN</div>
+        </div>
+    </div>
 
-        const timeSinceLastChange = user.lastNicknameChange ? 
-            (Date.now() - new Date(user.lastNicknameChange)) / 1000 : Infinity;
-        if (timeSinceLastChange < 17) {
-            socket.emit('nickname_error', { 
-                message: `You can only change your nickname once every 17 seconds. Please wait ${17 - Math.floor(timeSinceLastChange)} seconds.` 
+    <div class="wheel-container">
+        <div class="wheel-pointer"></div>
+        <div class="wheel" id="wheel">
+            <div class="current-winner" id="current-winner">
+                <div>SPIN THE WHEEL!</div>
+            </div>
+            <div class="wheel-center"></div>
+        </div>
+    </div>
+
+    <div class="countdown" id="countdown">
+        Next Spin: <span id="countdown-timer">15:00</span>
+    </div>
+
+    <div class="controls">
+        <button class="spin-button" onclick="spinWheel()" id="spin-btn">🎡 SPIN THE WHEEL 🎡</button>
+    </div>
+
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-number" id="last-winner">-</div>
+            <div class="stat-label">LAST WINNER</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number" id="winner-tokens">-</div>
+            <div class="stat-label">WINNER TOKENS</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number" id="spin-count">${spinHistory.length}</div>
+            <div class="stat-label">TOTAL SPINS</div>
+        </div>
+    </div>
+
+    <div class="holders-grid" id="holders-container">
+        ${holders.map(holder => `
+            <div class="holder-card">
+                <div class="holder-address">
+                    <a href="https://solscan.io/account/${holder.owner}" target="_blank">
+                        ${holder.owner.slice(0, 12)}...${holder.owner.slice(-12)}
+                    </a>
+                </div>
+                <div class="holder-tokens">${holder.amount.toLocaleString()} tokens</div>
+            </div>
+        `).join('')}
+    </div>
+
+    <div class="history-section">
+        <div class="history-title">🏆 SPIN HISTORY</div>
+        <div id="history-list">
+            ${spinHistory.map(spin => `
+                <div class="history-item">
+                    <strong>${spin.time}</strong> - 
+                    <a href="https://solscan.io/account/${spin.address}" target="_blank">
+                        ${spin.address.slice(0, 12)}...${spin.address.slice(-12)}
+                    </a> - 
+                    ${spin.tokens.toLocaleString()} tokens (${spin.percentage}%)
+                </div>
+            `).join('')}
+        </div>
+    </div>
+
+    <audio id="spinSound" src="https://assets.mixkit.co/sfx/preview/mixkit-slot-machine-wheel-1931.mp3"></audio>
+    <audio id="winSound" src="https://assets.mixkit.co/sfx/preview/mixkit-winning-chimes-2015.mp3"></audio>
+    <audio id="tickSound" src="https://assets.mixkit.co/sfx/preview/mixkit-arcade-game-jump-coin-216.mp3"></audio>
+
+    <script>
+        let countdown = 15 * 60;
+        let isSpinning = false;
+        let currentWinner = null;
+        
+        // Create wheel slices with holder addresses
+        function createWheelSlices() {
+            const wheel = document.getElementById('wheel');
+            // Clear existing slices except center and current winner
+            const currentWinnerDiv = document.getElementById('current-winner');
+            const wheelCenter = document.querySelector('.wheel-center');
+            wheel.innerHTML = '';
+            wheel.appendChild(currentWinnerDiv);
+            wheel.appendChild(wheelCenter);
+            
+            const sliceCount = Math.min(holders.length, 36); // Max 36 slices for readability
+            const angle = 360 / sliceCount;
+            
+            // Get top holders for the wheel (or all if less than 36)
+            const wheelHolders = [...holders]
+                .sort((a, b) => b.amount - a.amount)
+                .slice(0, sliceCount);
+            
+            wheelHolders.forEach((holder, index) => {
+                const slice = document.createElement('div');
+                slice.className = 'wheel-slice';
+                slice.style.transform = \`rotate(\${index * angle}deg)\`;
+                
+                // Shorten address for display
+                const shortAddress = \`\${holder.owner.slice(0, 6)}...\${holder.owner.slice(-4)}\`;
+                slice.innerHTML = \`
+                    <div style="transform: rotate(\${90 - angle/2}deg); transform-origin: left center;">
+                        \${shortAddress}<br>
+                        <small>\${(holder.amount/1000).toFixed(0)}K</small>
+                    </div>
+                \`;
+                
+                wheel.appendChild(slice);
             });
-            return;
+            
+            console.log(\`Created wheel with \${wheelHolders.length} holders\`);
         }
-
-        user.nickname = newNickname;
-        user.lastNicknameChange = new Date().toISOString();
-        users[wallet] = user;
-        writeJsonFile(USERS_FILE, users);
-
-        io.emit('nickname_changed', { wallet, newNickname });
-        socket.emit('nickname_changed', { nickname: newNickname });
-    });
-
-    socket.on('disconnect', () => {
-        const user = connectedUsers[socket.id];
-        if (user) {
-            console.log(`Client disconnected: ${user.wallet} (Identifier: ${user.identifier}, Nickname: ${user.nickname})`);
-            delete connectedUsers[socket.id];
+        
+        // Countdown timer
+        function updateCountdown() {
+            countdown--;
+            if (countdown <= 0) {
+                countdown = 15 * 60;
+                autoSpin();
+            }
+            const mins = Math.floor(countdown / 60);
+            const secs = countdown % 60;
+            const timerText = \`\${mins}:\${secs.toString().padStart(2, '0')}\`;
+            document.getElementById('countdown-timer').textContent = timerText;
+            document.getElementById('next-spin').textContent = timerText;
         }
+        
+        // Auto spin every 15 minutes
+        function autoSpin() {
+            if (!isSpinning) {
+                spinWheel();
+            }
+        }
+        
+        // Spin wheel function
+        async function spinWheel() {
+            if (isSpinning) return;
+            
+            isSpinning = true;
+            document.getElementById('spin-btn').disabled = true;
+            
+            // Play spin sound
+            document.getElementById('spinSound').play();
+            
+            const wheel = document.getElementById('wheel');
+            wheel.classList.add('wheel-spinning');
+            
+            // Update current winner display to show spinning
+            document.getElementById('current-winner').innerHTML = '<div>SPINNING...</div>';
+            
+            // Play tick sounds during spin
+            const tickInterval = setInterval(() => {
+                document.getElementById('tickSound').play();
+            }, 150);
+            
+            try {
+                const response = await fetch('/spin', { method: 'POST' });
+                const winner = await response.json();
+                
+                setTimeout(() => {
+                    clearInterval(tickInterval);
+                    wheel.classList.remove('wheel-spinning');
+                    
+                    if (winner && winner.address) {
+                        // Play win sound
+                        document.getElementById('winSound').play();
+                        
+                        // Update current winner display
+                        document.getElementById('current-winner').innerHTML = \`
+                            <div class="winner-address">
+                                \${winner.address.slice(0, 8)}...\${winner.address.slice(-8)}
+                            </div>
+                            <div class="winner-stats">
+                                \${winner.tokens.toLocaleString()} tokens<br>
+                                \${winner.percentage}%
+                            </div>
+                        \`;
+                        
+                        // Show winner popup
+                        showWinnerPopup(winner);
+                        
+                        // Update stats
+                        document.getElementById('last-winner').textContent = 
+                            winner.address.slice(0, 6) + '...' + winner.address.slice(-6);
+                        document.getElementById('winner-tokens').textContent = 
+                            winner.tokens.toLocaleString();
+                        document.getElementById('spin-count').textContent = 
+                            parseInt(document.getElementById('spin-count').textContent) + 1;
+                    }
+                    
+                    isSpinning = false;
+                    document.getElementById('spin-btn').disabled = false;
+                    
+                    // Reload page after showing winner to update history
+                    setTimeout(() => location.reload(), 5000);
+                    
+                }, 4000);
+                
+            } catch (error) {
+                console.error('Spin error:', error);
+                isSpinning = false;
+                document.getElementById('spin-btn').disabled = false;
+                wheel.classList.remove('wheel-spinning');
+                clearInterval(tickInterval);
+            }
+        }
+        
+        // Show winner popup
+        function showWinnerPopup(winner) {
+            const popup = document.createElement('div');
+            popup.className = 'winner-popup';
+            popup.innerHTML = \`
+                <h2 style="font-size: 2.5em; margin-bottom: 20px;">🎉 WHEEL WINNER! 🎉</h2>
+                <div style="font-size: 1.3em; margin: 15px 0; font-family: monospace;">
+                    <a href="https://solscan.io/account/\${winner.address}" target="_blank" style="color: white;">
+                        \${winner.address}
+                    </a>
+                </div>
+                <div style="font-size: 1.8em; color: #ffd700; margin: 15px 0;">
+                    🪙 \${winner.tokens.toLocaleString()} TOKENS
+                </div>
+                <div style="font-size: 1.2em;">
+                    📊 \${winner.percentage}% of total supply
+                </div>
+                <div style="margin-top: 20px; font-size: 1em; opacity: 0.9;">
+                    ⚖️ Weighted by token holdings
+                </div>
+            \`;
+            document.body.appendChild(popup);
+            
+            setTimeout(() => {
+                document.body.removeChild(popup);
+            }, 4500);
+        }
+        
+        // Initialize
+        createWheelSlices();
+        setInterval(updateCountdown, 1000);
+        
+        // Auto-refresh data every minute
+        setInterval(() => {
+            if (!isSpinning) {
+                location.reload();
+            }
+        }, 60000);
+    </script>
+</body>
+</html>
+    `);
+});
+
+// API to spin wheel
+app.post("/spin", (req, res) => {
+    const winner = spinWheel();
+    res.json(winner || { error: "No holders available" });
+});
+
+// API to get current data
+app.get("/api/data", (req, res) => {
+    res.json({
+        holders: holders.length,
+        totalTokens: holders.reduce((sum, h) => sum + h.amount, 0),
+        spinHistory: spinHistory
     });
 });
 
-app.get('/api/users', (req, res) => {
-    const users = readJsonFile(USERS_FILE);
-    res.json(users);
-});
-
-app.put('/api/users/update-nickname', (req, res) => {
-    const { wallet, newNickname, lastNicknameChange } = req.body;
-
-    if (!wallet || !newNickname || !lastNicknameChange) {
-        return res.status(400).json({ error: 'Wallet, newNickname, and lastNicknameChange are required' });
-    }
-
-    const users = readJsonFile(USERS_FILE);
-
-    if (!users[wallet]) {
-        return res.status(404).json({ error: 'Wallet address not found' });
-    }
-
-    users[wallet].nickname = newNickname;
-    users[wallet].lastNicknameChange = lastNicknameChange;
-
-    writeJsonFile(USERS_FILE, users);
-
-    res.json({ success: true, message: `Nickname updated to ${newNickname}` });
-});
-
-app.get('/get_nickname', (req, res) => {
-    const wallet = req.query.wallet;
-    const users = readJsonFile(USERS_FILE);
-    const user = users[wallet];
-    if (user) {
-        res.json({ success: true, nickname: user.nickname });
-    } else {
-        res.json({ success: false, message: 'User not found' });
-    }
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Server running on http://localhost:${PORT}`);
+// Start server
+const PORT = process.env.PORT || 1000;
+app.listen(PORT, async () => {
+    console.log(`🎡 WHEEL OF HOLDERS Server running on port ${PORT}`);  // Changed this line
+    console.log("⏰ Auto-spinning every 15 minutes");
+    console.log("💰 Weighted chances based on token holdings");
+    console.log("🎯 Wheel shows actual holder addresses!");
+    
+    await getHolders();
+    
+    // Auto-spin every 15 minutes
+    setInterval(() => {
+        spinWheel();
+    }, SPIN_INTERVAL);
+    
+    // Refresh holders every minute
+    setInterval(getHolders, 60000);
 });
